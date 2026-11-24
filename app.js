@@ -310,10 +310,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (result.success && result.originalTitle) {
         if (result.isPlatformIntegration && !result.canDirectDownload) {
+          // Platform can be read but not downloaded (Vimeo, SoundCloud without direct URL)
           clearPreview();
           activeSourceType = null;
           activeMediaUrl = null;
           showErrorStatus(`"${result.originalTitle}": Ky integrim shërben vetëm për leximin e titullit dhe nuk lejon shkarkim të drejtpërdrejtë. Ju lutem ngarkoni skedarin nga kompjuteri (Upload) ose vendosni një link direkt.`);
+          return;
+        }
+        // YouTube with needsManualTitle: allow conversion but show title input
+        if (result.needsManualTitle) {
+          activeSourceType = 'link';
+          activeMediaUrl = trimmed;
+          activeFileToken = null;
+          applyTrackAvailability(true, true);
+          showManualTitlePrompt('Titulli nuk u mor automatikisht. Shkruajeni titullin manualisht për të vazhduar:');
           return;
         }
         hideInspectionStatus();
