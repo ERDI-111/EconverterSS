@@ -1,0 +1,20 @@
+{
+  "name": "econverters",
+  "version": "1.0.0",
+  "description": "EconverterS — High-fidelity MP3 & MP4 media converter with original filename preservation, yt-dlp integration, and FFmpeg transcoding.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "media-converter",
+    "ffmpeg",
+    "mp3",
+    "mp4",
+    "yt-dlp",
+    "audio-converter",
+    "video-converter"
+  ],
+  "author": "ERDI-111",
+  "license": "MIT"
+}
