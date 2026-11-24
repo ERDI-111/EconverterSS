@@ -9,6 +9,33 @@ const { spawn, execFile } = require('child_process');
 const crypto = require('crypto');
 
 // ==========================================================================
+// Binary Resolvers (local PATH + npm static binaries + bin/ directory)
+// ==========================================================================
+let FFMPEG_BIN = 'ffmpeg';
+let FFPROBE_BIN = 'ffprobe';
+let YTDLP_BIN = 'yt-dlp';
+
+try {
+  const ffmpegStatic = require('ffmpeg-static');
+  if (ffmpegStatic && fs.existsSync(ffmpegStatic)) FFMPEG_BIN = ffmpegStatic;
+} catch (e) {}
+
+try {
+  const ffprobeStatic = require('ffprobe-static');
+  if (ffprobeStatic && ffprobeStatic.path && fs.existsSync(ffprobeStatic.path)) FFPROBE_BIN = ffprobeStatic.path;
+} catch (e) {}
+
+const localBinDir = path.join(__dirname, 'bin');
+const localYtDlp = path.join(localBinDir, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
+if (fs.existsSync(localYtDlp)) {
+  YTDLP_BIN = localYtDlp;
+}
+
+// Add local bin and ffmpeg directory to process.env.PATH so yt-dlp can find ffmpeg
+const ffmpegDir = path.dirname(FFMPEG_BIN);
+process.env.PATH = `${localBinDir}${path.delimiter}${ffmpegDir}${path.delimiter}${process.env.PATH || ''}`;
+
+// ==========================================================================
 // Server Configuration & Environment
 // ==========================================================================
 const CONFIG = {
@@ -369,7 +396,7 @@ async function inspectMediaLink(targetUrl) {
     if (!title) {
       try {
         title = await new Promise((resolve) => {
-          execFile('yt-dlp', ['--no-playlist', '--get-title', targetUrl], { timeout: 12000 }, (err, stdout) => {
+          execFile(YTDLP_BIN, ['--no-playlist', '--get-title', targetUrl], { timeout: 12000 }, (err, stdout) => {
             if (!err && stdout && stdout.trim().length > 0) resolve(stdout.trim().split('\n')[0]);
             else resolve(null);
           });
@@ -514,7 +541,7 @@ async function inspectMediaLink(targetUrl) {
 function analyzeMediaFile(filePath) {
   return new Promise((resolve, reject) => {
     execFile(
-      'ffprobe',
+      FFPROBE_BIN,
       [
         '-v', 'error',
         '-show_entries', 'stream=index,codec_type,codec_name,width,height:format=duration,size',
@@ -600,7 +627,7 @@ async function processNextJob() {
         ytArgs.push(job.sourceUrl);
 
         await new Promise((resolve, reject) => {
-          const proc = spawn('yt-dlp', ytArgs, { timeout: CONFIG.limits.jobTimeoutMs });
+          const proc = spawn(YTDLP_BIN, ytArgs, { timeout: CONFIG.limits.jobTimeoutMs });
 
           let stderr = '';
           proc.stderr.on('data', d => stderr += d.toString());
@@ -680,7 +707,7 @@ async function processNextJob() {
     job.progress = 50;
 
     await new Promise((resolve, reject) => {
-      const proc = spawn('ffmpeg', ffmpegArgs, { timeout: CONFIG.limits.jobTimeoutMs });
+      const proc = spawn(FFMPEG_BIN, ffmpegArgs, { timeout: CONFIG.limits.jobTimeoutMs });
       let stderrData = '';
 
       proc.stderr.on('data', chunk => {
