@@ -14,7 +14,7 @@ const crypto = require('crypto');
 const CONFIG = {
   port: parseInt(process.env.PORT, 10) || 3080,
   stagingAuth: {
-    enabled: process.env.STAGING_AUTH !== 'false', // Default true for staging
+    enabled: process.env.STAGING_AUTH === 'true', // Disabled by default for public production launch
     username: process.env.STAGING_USER || 'econverters',
     password: process.env.STAGING_PASS || 'staging-access-2026'
   },
@@ -1207,7 +1207,11 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(CONFIG.port, () => {
-  console.log(`EconverterS staging server running at http://localhost:${CONFIG.port}`);
-  console.log(`Staging protection active: User "${CONFIG.stagingAuth.username}"`);
+  console.log(`EconverterS server running at http://localhost:${CONFIG.port}`);
+  if (CONFIG.stagingAuth.enabled) {
+    console.log(`Staging protection active: User "${CONFIG.stagingAuth.username}"`);
+  } else {
+    console.log(`Public access active: No login required.`);
+  }
   console.log(`Limits: Max Upload ${CONFIG.limits.maxFileSizeMB} MB | Timeout ${CONFIG.limits.jobTimeoutMs / 1000}s | Concurrency ${CONFIG.limits.maxConcurrentJobs} | Expiry ${CONFIG.limits.fileExpiryMin}m`);
 });
