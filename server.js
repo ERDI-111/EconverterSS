@@ -396,7 +396,7 @@ async function inspectMediaLink(targetUrl) {
     if (!title) {
       try {
         title = await new Promise((resolve) => {
-          execFile(YTDLP_BIN, ['--no-playlist', '--get-title', targetUrl], { timeout: 12000 }, (err, stdout) => {
+          execFile(YTDLP_BIN, ['--extractor-args', 'youtube:player_client=android,web', '--no-playlist', '--get-title', targetUrl], { timeout: 12000 }, (err, stdout) => {
             if (!err && stdout && stdout.trim().length > 0) resolve(stdout.trim().split('\n')[0]);
             else resolve(null);
           });
@@ -611,14 +611,28 @@ async function processNextJob() {
         const ytTempPrefix = `input_${job.id}_yt`;
         const ytTempPath = path.join(UPLOADS_DIR, `${ytTempPrefix}.%(ext)s`);
         const isMp4 = job.format === 'mp4';
-        const ytFormat = isMp4 ? 'bv*[ext=mp4][vcodec^=avc][height<=1080]+ba[ext=m4a]/bv*[height<=1080]+ba/b[height<=1080]/b' : 'ba/b';
+        const ytFormat = isMp4
+          ? 'bv*[ext=mp4][vcodec^=avc][height<=1080]+ba[ext=m4a]/bv*[height<=1080]+ba/18/b'
+          : 'ba/b/18';
 
         const ytArgs = [
+          '--extractor-args', 'youtube:player_client=android,web',
           '-f', ytFormat,
           '--no-playlist',
           '--max-filesize', `${CONFIG.limits.maxFileSizeMB}M`,
           '-o', ytTempPath
         ];
+
+        // Support optional cookies passed via env var or file (e.g. for cloud hosting)
+        const cookiesFile = path.join(__dirname, 'cookies.txt');
+        if (process.env.YOUTUBE_COOKIES) {
+          try {
+            fs.writeFileSync(cookiesFile, process.env.YOUTUBE_COOKIES.trim(), 'utf-8');
+            ytArgs.push('--cookies', cookiesFile);
+          } catch (e) {}
+        } else if (fs.existsSync(cookiesFile)) {
+          ytArgs.push('--cookies', cookiesFile);
+        }
 
         if (isMp4) {
           ytArgs.push('--merge-output-format', 'mp4');
