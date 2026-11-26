@@ -36,6 +36,30 @@ ffprobe -version
 | `MAX_QUEUE_SIZE` | `10` | Max jobs that can be queued + running. Set to `0` to pause new conversions immediately. |
 | `RATE_LIMIT_MAX` | `5` | Max new conversion jobs per IP per rate-limit window |
 | `RATE_LIMIT_WINDOW_MIN` | `10` | Rate-limit sliding window in minutes |
+| `YOUTUBE_COOKIES` | — | Raw Netscape `cookies.txt` content for YouTube (prefer the Secret File below) |
+| `YOUTUBE_COOKIES_B64` | — | Same cookies file, base64 encoded (handy if a dashboard mangles tabs/newlines) |
+| `YOUTUBE_COOKIES_FILE` | — | Custom path to a cookies file |
+| `YTDLP_PROXY` | — | Optional proxy for yt-dlp, e.g. `http://user:pass@host:port` (residential proxies avoid the bot check) |
+| `YTDLP_AUTO_UPDATE` | `true` | Set to `false` to skip the `yt-dlp -U` self-update on startup |
+
+### YouTube on Render ("Sign in to confirm you're not a bot")
+
+YouTube blocks most datacenter IPs (Render, AWS, ...). Changing player clients does not help — the server
+needs cookies from a logged-in YouTube account (use a throwaway Google account; YouTube can ban accounts used this way).
+
+1. Open a **new private/incognito window**, log into YouTube.
+2. In the same tab open `https://www.youtube.com/robots.txt`.
+3. Export `youtube.com` cookies with the "Get cookies.txt LOCALLY" extension, then **close the private window**
+   (so the session is never rotated by the browser).
+4. Render Dashboard → this service → **Environment** → **Secret Files** → **Add file**
+   - File name: `cookies.txt`
+   - Contents: paste the exported file → **Done** → **Save, rebuild, and deploy**.
+5. Check `https://<your-app>.onrender.com/api/info` → `youtubeCookiesConfigured` should be `true`,
+   and the Render logs should show `[yt] YouTube cookies: loaded from /etc/secrets/cookies.txt`.
+
+When cookies expire, the app shows "YouTube rejected this server's sign-in cookies" — repeat the steps above.
+Requires Node 22+ (set in `package.json` `engines`) so yt-dlp can use Node as its JavaScript runtime.
+Never commit `cookies.txt` (it is git-ignored; this repo is public).
 
 ---
 

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "EconverterS — High-fidelity MP3 & MP4 media converter with original filename preservation, yt-dlp integration, and FFmpeg transcoding.",
   "main": "server.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node server.js",
     "postinstall": "node setup-binaries.js"

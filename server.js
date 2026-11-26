@@ -36,6 +36,172 @@ const ffmpegDir = path.dirname(FFMPEG_BIN);
 process.env.PATH = `${localBinDir}${path.delimiter}${ffmpegDir}${path.delimiter}${process.env.PATH || ''}`;
 
 // ==========================================================================
+// YouTube / yt-dlp helpers
+// --------------------------------------------------------------------------
+// YouTube shows "Sign in to confirm you're not a bot" to almost every
+// datacenter IP (Render, AWS, ...). Switching player clients does not help;
+// the reliable fix is passing logged-in YouTube cookies (and/or a proxy).
+//
+// Cookies are read from (first match wins):
+//   1. YOUTUBE_COOKIES        env var  - raw Netscape cookies.txt content
+//   2. YOUTUBE_COOKIES_B64    env var  - same file, base64 encoded
+//   3. YOUTUBE_COOKIES_FILE   env var  - path to a cookies.txt file
+//   4. /etc/secrets/cookies.txt        - Render "Secret File" (recommended)
+//   5. /etc/secrets/youtube_cookies.txt
+//   6. ./cookies.txt                   - local development (git-ignored)
+// Optional: YTDLP_PROXY (or YOUTUBE_PROXY) = http://user:pass@host:port
+// ==========================================================================
+const NODE_MAJOR = parseInt(process.versions.node.split('.')[0], 10);
+
+function readYouTubeCookiesSource() {
+  if (process.env.YOUTUBE_COOKIES && process.env.YOUTUBE_COOKIES.trim()) {
+    return { content: process.env.YOUTUBE_COOKIES, source: 'env:YOUTUBE_COOKIES' };
+  }
+  if (process.env.YOUTUBE_COOKIES_B64 && process.env.YOUTUBE_COOKIES_B64.trim()) {
+    try {
+      return {
+        content: Buffer.from(process.env.YOUTUBE_COOKIES_B64.trim(), 'base64').toString('utf-8'),
+        source: 'env:YOUTUBE_COOKIES_B64'
+      };
+    } catch (e) {}
+  }
+  const candidates = [
+    process.env.YOUTUBE_COOKIES_FILE,
+    '/etc/secrets/cookies.txt',
+    '/etc/secrets/youtube_cookies.txt',
+    path.join(__dirname, 'cookies.txt')
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p) && fs.statSync(p).size > 0) {
+        return { content: fs.readFileSync(p, 'utf-8'), source: p };
+      }
+    } catch (e) {}
+  }
+  return null;
+}
+
+function normalizeNetscapeCookies(raw) {
+  let text = String(raw).replace(/^\uFEFF/, '');
+  // Dashboards sometimes flatten multi-line values into literal "\n" / "\t"
+  if (!text.includes('\n') && text.includes('\\n')) {
+    text = text.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
+  }
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').map(line => {
+    const trimmed = line.trim();
+    if (!trimmed || (trimmed.startsWith('#') && !trimmed.startsWith('#HttpOnly_'))) return trimmed;
+    if (line.includes('\t')) return line.trim();
+    // Tabs were converted to spaces somewhere - rebuild the 7 tab-separated fields
+    const parts = trimmed.split(/\s+/);
+    if (parts.length >= 7) return [...parts.slice(0, 6), parts.slice(6).join(' ')].join('\t');
+    return trimmed;
+  });
+  let out = lines.join('\n').trim() + '\n';
+  if (!/^# (Netscape )?HTTP Cookie File/i.test(out)) out = '# Netscape HTTP Cookie File\n' + out;
+  return out;
+}
+
+// yt-dlp rewrites the cookie jar on exit and /etc/secrets is read-only, so
+// every run gets its own writable copy inside tmp/.
+function prepareYouTubeCookies(tag) {
+  const src = readYouTubeCookiesSource();
+  if (!src) return null;
+  try {
+    const dir = path.join(__dirname, 'tmp');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const out = path.join(dir, `yt_cookies_${tag}.txt`);
+    fs.writeFileSync(out, normalizeNetscapeCookies(src.content), { encoding: 'utf-8', mode: 0o600 });
+    return out;
+  } catch (e) {
+    console.warn('[yt] could not prepare cookies file:', e.message);
+    return null;
+  }
+}
+
+function cleanupFile(p) {
+  if (!p) return;
+  try { fs.unlinkSync(p); } catch (e) {}
+}
+
+// Common yt-dlp flags: JS challenge runtime, cookies, proxy
+function ytDlpCommonArgs(cookiesPath) {
+  const args = ['--no-playlist', '--no-progress', '--retries', '3', '--extractor-retries', '2'];
+  // yt-dlp needs a JS runtime (Node 22+ or Deno) to solve YouTube's player challenges.
+  // Reuse the Node binary that runs this server.
+  if (NODE_MAJOR >= 22) args.push('--js-runtimes', `node:${process.execPath}`);
+  if (cookiesPath) args.push('--cookies', cookiesPath);
+  const proxy = process.env.YTDLP_PROXY || process.env.YOUTUBE_PROXY;
+  if (proxy) args.push('--proxy', proxy);
+  return args;
+}
+
+// Player-client plans tried in order. null = yt-dlp's own (best maintained) defaults.
+function ytClientPlans(hasCookies) {
+  return hasCookies
+    ? [null, 'tv,web_embedded,mweb', 'web_safari,web']
+    : [null, 'android_vr,tv_simply,web_embedded', 'ios,mweb'];
+}
+
+function isYtBotCheck(text) {
+  return /confirm you.?re not a bot|Sign in to confirm/i.test(text || '');
+}
+
+function friendlyYouTubeError(stderr, hadCookies) {
+  const text = String(stderr || '');
+  if (isYtBotCheck(text)) {
+    return hadCookies
+      ? 'YouTube rejected this server\'s sign-in cookies (they have probably expired). Please try again later or upload the file directly.'
+      : 'YouTube is temporarily blocking downloads from this server. Please try again later or upload the file directly.';
+  }
+  const errLine = text.split('\n').map(l => l.trim()).filter(l => l.startsWith('ERROR:')).pop();
+  const clean = (errLine || text.trim().split('\n').pop() || 'Unknown error')
+    .replace(/^ERROR:\s*/, '')
+    .replace(/^\[youtube\]\s*[\w-]+:\s*/, '');
+  if (/Video unavailable|Private video|This video is private|has been removed/i.test(clean)) {
+    return 'This YouTube video is unavailable or private.';
+  }
+  if (/age[- ]restricted|confirm your age|inappropriate for some users/i.test(clean)) {
+    return 'This YouTube video is age-restricted and cannot be downloaded without sign-in.';
+  }
+  if (/max-filesize|larger than max-filesize|File is larger/i.test(text)) {
+    return 'This video is larger than the maximum allowed size.';
+  }
+  return `YouTube download error: ${clean.slice(0, 300)}`;
+}
+
+function runYtDlp(args, timeoutMs) {
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let proc;
+    try {
+      proc = spawn(YTDLP_BIN, args, { timeout: timeoutMs });
+    } catch (err) {
+      return resolve({ code: -1, stdout, stderr: `yt-dlp execution error: ${err.message}` });
+    }
+    proc.stdout.on('data', d => { stdout += d.toString(); });
+    proc.stderr.on('data', d => { stderr += d.toString(); });
+    proc.on('error', err => resolve({ code: -1, stdout, stderr: stderr + `\nERROR: yt-dlp execution error: ${err.message}` }));
+    proc.on('close', code => resolve({ code, stdout, stderr }));
+  });
+}
+
+// Keep yt-dlp fresh: YouTube breaks old versions every few weeks.
+if (process.env.YTDLP_AUTO_UPDATE !== 'false' && YTDLP_BIN === localYtDlp) {
+  try {
+    const upd = spawn(YTDLP_BIN, ['-U'], { timeout: 120000 });
+    upd.on('error', () => {});
+    upd.on('close', code => console.log(`[yt] yt-dlp self-update finished (code ${code})`));
+  } catch (e) {}
+}
+
+{
+  const src = readYouTubeCookiesSource();
+  console.log(`[yt] YouTube cookies: ${src ? 'loaded from ' + src.source : 'NOT configured (YouTube will likely block this server)'}`);
+  console.log(`[yt] JS runtime for yt-dlp: ${NODE_MAJOR >= 22 ? 'node ' + process.versions.node : 'none (Node ' + process.versions.node + ' < 22)'}`);
+}
+
+// ==========================================================================
 // Server Configuration & Environment
 // ==========================================================================
 const CONFIG = {
@@ -395,12 +561,15 @@ async function inspectMediaLink(targetUrl) {
     // If oEmbed didn't get title, try yt-dlp to inspect title
     if (!title) {
       try {
-        title = await new Promise((resolve) => {
-          execFile(YTDLP_BIN, ['--extractor-args', 'youtube:player_client=android', '--no-playlist', '--get-title', targetUrl], { timeout: 15000 }, (err, stdout) => {
-            if (!err && stdout && stdout.trim().length > 0) resolve(stdout.trim().split('\n')[0]);
-            else resolve(null);
-          });
-        });
+        const tag = `inspect_${crypto.randomBytes(6).toString('hex')}`;
+        const cookiesPath = prepareYouTubeCookies(tag);
+        try {
+          const r = await runYtDlp([...ytDlpCommonArgs(cookiesPath), '--skip-download', '--print', 'title', targetUrl], 20000);
+          const line = (r.stdout || '').trim().split('\n')[0];
+          if (r.code === 0 && line) title = line.trim();
+        } finally {
+          cleanupFile(cookiesPath);
+        }
       } catch (e) {}
     }
 
@@ -614,42 +783,54 @@ async function processNextJob() {
         job.progress = 25;
         const ytTempPrefix = `input_${job.id}_yt`;
         const ytTempPath = path.join(UPLOADS_DIR, `${ytTempPrefix}.%(ext)s`);
-        // Format 18 = 360p MP4 (video+audio combined, h264+aac) served from legacy YouTube CDN.
-        // This is the most reliable format for datacenter IPs (Render/AWS) because it bypasses
-        // SABR streaming restrictions that block higher quality DASH streams.
-        // Both MP3 and MP4 jobs download format 18; FFmpeg then extracts audio or remuxes.
-        const ytArgs = [
-          '--extractor-args', 'youtube:player_client=android',
-          '-f', '18',
-          '--no-playlist',
-          '--max-filesize', `${CONFIG.limits.maxFileSizeMB}M`,
-          '-o', ytTempPath
-        ];
+        // Format preference: MP3 jobs take the best audio-only stream, MP4 jobs take
+        // H.264/AAC up to 1080p. Format 18 (360p progressive MP4) stays as a fallback.
+        const formatSelector = job.format === 'mp3'
+          ? 'ba[ext=m4a]/ba/18/b'
+          : 'bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/b[ext=mp4][height<=1080]/18/bv*[height<=1080]+ba/b';
 
-        // Support optional cookies passed via env var or file (e.g. for cloud hosting)
-        const cookiesFile = path.join(__dirname, 'cookies.txt');
-        if (process.env.YOUTUBE_COOKIES) {
-          try {
-            fs.writeFileSync(cookiesFile, process.env.YOUTUBE_COOKIES.trim(), 'utf-8');
-            ytArgs.push('--cookies', cookiesFile);
-          } catch (e) {}
-        } else if (fs.existsSync(cookiesFile)) {
-          ytArgs.push('--cookies', cookiesFile);
+        const cookiesPath = prepareYouTubeCookies(job.id);
+        const hasCookies = !!cookiesPath;
+        let lastStderr = '';
+        let downloaded = false;
+
+        try {
+          for (const clients of ytClientPlans(hasCookies)) {
+            // Clear leftovers from a previous attempt
+            for (const f of fs.readdirSync(UPLOADS_DIR)) {
+              if (f.startsWith(`${ytTempPrefix}.`)) cleanupFile(path.join(UPLOADS_DIR, f));
+            }
+
+            const ytArgs = [
+              ...ytDlpCommonArgs(cookiesPath),
+              ...(clients ? ['--extractor-args', `youtube:player_client=${clients}`] : []),
+              '-f', formatSelector,
+              '--merge-output-format', 'mp4',
+              '--max-filesize', `${CONFIG.limits.maxFileSizeMB}M`,
+              '-o', ytTempPath,
+              job.sourceUrl
+            ];
+
+            const result = await runYtDlp(ytArgs, CONFIG.limits.jobTimeoutMs);
+            if (result.code === 0) {
+              downloaded = true;
+              break;
+            }
+            lastStderr = result.stderr || '';
+            console.warn(`[yt] jobId=${job.id} clients=${clients || 'default'} cookies=${hasCookies} failed: ${lastStderr.trim().split('\n').filter(l => l.startsWith('ERROR:')).pop() || lastStderr.slice(-300)}`);
+
+            // The bot wall is IP based: without cookies every other client gets the same answer
+            if (isYtBotCheck(lastStderr) && !hasCookies) break;
+            // Permanent errors - no point retrying with other clients
+            if (/Video unavailable|Private video|has been removed|max-filesize|File is larger/i.test(lastStderr)) break;
+          }
+        } finally {
+          cleanupFile(cookiesPath);
         }
 
-        ytArgs.push(job.sourceUrl);
-
-        await new Promise((resolve, reject) => {
-          const proc = spawn(YTDLP_BIN, ytArgs, { timeout: CONFIG.limits.jobTimeoutMs });
-
-          let stderr = '';
-          proc.stderr.on('data', d => stderr += d.toString());
-          proc.on('error', err => reject(new Error(`yt-dlp execution error: ${err.message}`)));
-          proc.on('close', code => {
-            if (code === 0) resolve();
-            else reject(new Error(`YouTube download error: ${stderr.slice(-200)}`));
-          });
-        });
+        if (!downloaded) {
+          throw new Error(friendlyYouTubeError(lastStderr, hasCookies));
+        }
 
         // Find the completed downloaded file (exclude temporary .part or intermediate .fXXX. files)
         const allFiles = fs.readdirSync(UPLOADS_DIR);
@@ -829,6 +1010,8 @@ const server = http.createServer(async (req, res) => {
         directLinks: ['mp3', 'wav', 'flac', 'aac', 'ogg', 'opus', 'mp4', 'mov', 'webm', 'mkv'],
         integrations: {
           youtube: 'Metadata / title inspection active; direct media streams require authorized URL or uploaded file.',
+          youtubeCookiesConfigured: !!readYouTubeCookiesSource(),
+          youtubeJsRuntime: NODE_MAJOR >= 22 ? `node ${process.versions.node}` : null,
           vimeo: 'Metadata inspection active.',
           soundcloud: 'Metadata inspection active.'
         }

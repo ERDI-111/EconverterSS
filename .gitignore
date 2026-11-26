@@ -6,6 +6,10 @@ test_downloads/
 node_modules/
 .env
 
+# Never commit YouTube cookies (this repo is public)
+cookies.txt
+*cookies*.txt
+
 # Test media files
 *.part
 *.ytdl
